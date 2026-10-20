@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Fond vert -->
+    <path
+        android:fillColor="#1B5E20"
+        android:pathData="M54,4 A50,50 0 1,1 53.99,4 Z" />
+    <!-- Croissant -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M60,24 A30,30 0 1,0 60,84 A40,40 0 0,1 60,24 Z" />
+    <!-- Etoile (point) -->
+    <path
+        android:fillColor="#FFD54F"
+        android:pathData="M74,48 A6,6 0 1,1 73.99,48 Z" />
+</vector>
