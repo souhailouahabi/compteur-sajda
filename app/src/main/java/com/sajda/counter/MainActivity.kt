@@ -24,16 +24,17 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 
 /**
- * Compteur de sajdas par capteur de proximité.
+ * Compteur de sajdas par capteur de proximité (v2).
  *
- * Utilisation : poser le téléphone au sol, écran vers le haut, à l'endroit
- * de la prosternation. Quand la tête s'approche du haut du téléphone
- * (où se trouve le capteur), une sajda est comptée.
- * 2 sajdas = 1 rak'a.
+ * Poser le téléphone au sol, écran vers le haut, le haut du téléphone
+ * (où se trouve le capteur) sous l'endroit du front. 2 sajdas = 1 rak'a.
+ *
+ * v2 : diagnostic en direct du capteur + réglage de sensibilité.
  */
 class MainActivity : Activity(), SensorEventListener {
 
@@ -49,10 +50,10 @@ class MainActivity : Activity(), SensorEventListener {
     )
 
     // --- Réglages de détection ---
-    /** La tête doit rester proche au moins ce temps pour compter une sajda. */
-    private val dureeMinProche = 500L
-    /** Un éloignement plus court que ça est considéré comme un tremblement. */
-    private val dureeMinLoin = 900L
+    /** Durée minimale "tête proche" pour compter une sajda (réglable, en ms). */
+    private var dureeMinProche = 300L
+    /** Un éloignement plus court que ça pendant une sajda est ignoré. */
+    private val dureeMinLoin = 700L
     /** Temps laissé pour poser le téléphone après avoir appuyé sur Démarrer. */
     private val delaiDemarrage = 3000L
     private var debutEcoute = 0L
@@ -67,6 +68,8 @@ class MainActivity : Activity(), SensorEventListener {
     private var estProche = false
     private var sajdaEnCours = false
     private var dernierLoin = 0L
+    private var derniereValeur = Float.NaN
+    private var nbChangements = 0
     private val handler = Handler(Looper.getMainLooper())
     private val confirmation = Runnable {
         if (actif && estProche && !sajdaEnCours) {
@@ -80,8 +83,13 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var txtObjectif: TextView
     private lateinit var txtDetail: TextView
     private lateinit var txtEtat: TextView
+    private lateinit var txtDiag: TextView
+    private lateinit var txtSensibilite: TextView
     private lateinit var btnStart: Button
     private lateinit var spinner: Spinner
+    private lateinit var seek: SeekBar
+
+    private val prefs by lazy { getSharedPreferences("reglages", Context.MODE_PRIVATE) }
 
     private val vibreur: Vibrator? by lazy {
         if (Build.VERSION.SDK_INT >= 31) {
@@ -95,12 +103,14 @@ class MainActivity : Activity(), SensorEventListener {
         super.onCreate(savedInstanceState)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
         capteur = sensorManager?.getDefaultSensor(Sensor.TYPE_PROXIMITY)
+        dureeMinProche = prefs.getLong("dureeMinProche", 300L)
         setContentView(construireInterface())
         if (capteur == null) {
             txtEtat.text = "⚠️ Ce téléphone n'a pas de capteur de proximité.\nVous pouvez compter manuellement avec +1 / −1."
             btnStart.isEnabled = false
         }
         majAffichage()
+        majDiag()
     }
 
     // ------------------------------------------------------------------
@@ -110,14 +120,14 @@ class MainActivity : Activity(), SensorEventListener {
 
     private fun bouton(texte: String, couleur: Int, action: () -> Unit) = Button(this).apply {
         text = texte
-        textSize = 18f
+        textSize = 17f
         setTextColor(Color.WHITE)
         isAllCaps = false
         background = GradientDrawable().apply {
             cornerRadius = dp(14).toFloat()
             setColor(couleur)
         }
-        setPadding(dp(16), dp(14), dp(16), dp(14))
+        setPadding(dp(12), dp(12), dp(12), dp(12))
         setOnClickListener { action() }
     }
 
@@ -126,7 +136,7 @@ class MainActivity : Activity(), SensorEventListener {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setBackgroundColor(Color.parseColor("#0E1A12"))
-            setPadding(dp(20), dp(32), dp(20), dp(24))
+            setPadding(dp(20), dp(28), dp(20), dp(20))
         }
 
         racine.addView(TextView(this).apply {
@@ -152,10 +162,10 @@ class MainActivity : Activity(), SensorEventListener {
         }
         racine.addView(spinner, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(16) })
+        ).apply { topMargin = dp(12) })
 
         txtRakat = TextView(this).apply {
-            textSize = 110f
+            textSize = 100f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
@@ -175,7 +185,7 @@ class MainActivity : Activity(), SensorEventListener {
             textSize = 16f
             setTextColor(Color.parseColor("#81C784"))
             gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, dp(6))
+            setPadding(0, dp(4), 0, dp(4))
         }
         racine.addView(txtDetail)
 
@@ -183,15 +193,56 @@ class MainActivity : Activity(), SensorEventListener {
             textSize = 14f
             setTextColor(Color.parseColor("#9E9E9E"))
             gravity = Gravity.CENTER
-            setPadding(0, dp(8), 0, dp(16))
+            setPadding(0, dp(4), 0, dp(8))
         }
         racine.addView(txtEtat)
 
+        // Diagnostic en direct du capteur
+        txtDiag = TextView(this).apply {
+            textSize = 13f
+            typeface = Typeface.MONOSPACE
+            setTextColor(Color.parseColor("#FFE082"))
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.parseColor("#1C2A20"))
+            }
+        }
+        racine.addView(txtDiag, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(8) })
+
+        // Sensibilité
+        txtSensibilite = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#C8E6C9"))
+            gravity = Gravity.CENTER
+        }
+        racine.addView(txtSensibilite)
+        seek = SeekBar(this).apply {
+            max = 14 // 0,1 s à 1,5 s par pas de 0,1 s
+            progress = ((dureeMinProche / 100L) - 1).toInt().coerceIn(0, 14)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                    dureeMinProche = (p + 1) * 100L
+                    prefs.edit().putLong("dureeMinProche", dureeMinProche).apply()
+                    majSensibilite()
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+        racine.addView(seek, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(8) })
+        majSensibilite()
+
         // Correction manuelle
-        val ligneCorrection = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val poidsLp = { LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
             marginStart = dp(4); marginEnd = dp(4)
         } }
+        val ligneCorrection = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         ligneCorrection.addView(bouton("−1 sajda", Color.parseColor("#37474F")) {
             if (sajdas > 0) sajdas--
             majAffichage()
@@ -209,13 +260,20 @@ class MainActivity : Activity(), SensorEventListener {
         ligneAction.addView(bouton("Remettre à 0", Color.parseColor("#6D4C41")) {
             sajdas = 0
             sajdaEnCours = false
+            nbChangements = 0
             majAffichage()
+            majDiag()
         }, poidsLp())
         racine.addView(ligneAction, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(10) })
+        ).apply { topMargin = dp(8) })
 
         return racine
+    }
+
+    private fun majSensibilite() {
+        val s = String.format("%.1f", dureeMinProche / 1000f).replace('.', ',')
+        txtSensibilite.text = "Tête baissée au moins $s s pour compter\n(gauche = plus sensible, droite = moins sensible)"
     }
 
     // ------------------------------------------------------------------
@@ -230,22 +288,21 @@ class MainActivity : Activity(), SensorEventListener {
         actif = true
         sajdas = 0
         sajdaEnCours = false
-        estProche = false
         dernierLoin = 0L
+        nbChangements = 0
         debutEcoute = SystemClock.elapsedRealtime()
         spinner.isEnabled = false
         btnStart.text = "Arrêter"
-        ecouterCapteur(true)
-        // Écran allumé et très sombre pendant la prière
+        // Écran allumé et sombre pendant la prière
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window.attributes = window.attributes.apply { screenBrightness = 0.05f }
+        window.attributes = window.attributes.apply { screenBrightness = 0.1f }
         majAffichage()
+        majDiag()
     }
 
     private fun arreter() {
         actif = false
         handler.removeCallbacks(confirmation)
-        ecouterCapteur(false)
         spinner.isEnabled = true
         btnStart.text = "Démarrer"
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -255,34 +312,38 @@ class MainActivity : Activity(), SensorEventListener {
         majAffichage()
     }
 
-    private fun ecouterCapteur(oui: Boolean) {
-        val sm = sensorManager ?: return
-        val c = capteur ?: return
-        if (oui) sm.registerListener(this, c, SensorManager.SENSOR_DELAY_UI)
-        else sm.unregisterListener(this)
-    }
-
+    // Le capteur est écouté dès que l'appli est visible (pour le diagnostic).
     override fun onResume() {
         super.onResume()
-        if (actif) ecouterCapteur(true)
+        val c = capteur ?: return
+        sensorManager?.registerListener(this, c, SensorManager.SENSOR_DELAY_GAME)
     }
 
     override fun onPause() {
         super.onPause()
-        if (actif) ecouterCapteur(false)
+        sensorManager?.unregisterListener(this)
     }
 
     // ------------------------------------------------------------------
     // Détection
     // ------------------------------------------------------------------
+    private fun seuil(c: Sensor): Float = minOf(c.maximumRange, 5f)
+
     override fun onSensorChanged(event: SensorEvent) {
-        if (!actif) return
-        // Délai au démarrage pour avoir le temps de poser le téléphone
-        if (SystemClock.elapsedRealtime() - debutEcoute < delaiDemarrage) return
         val c = capteur ?: return
-        val seuil = minOf(c.maximumRange, 5f)
-        val proche = event.values[0] < seuil
-        if (proche) quandProche() else quandLoin()
+        val valeur = event.values[0]
+        val proche = valeur < seuil(c)
+        if (derniereValeur.isNaN() || (valeur < seuil(c)) != (derniereValeur < seuil(c))) nbChangements++
+        derniereValeur = valeur
+
+        val enAttente = actif && SystemClock.elapsedRealtime() - debutEcoute < delaiDemarrage
+        if (actif && !enAttente) {
+            if (proche) quandProche() else quandLoin()
+        } else {
+            // Hors comptage : on suit quand même l'état pour le diagnostic
+            estProche = proche
+        }
+        majDiag()
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -294,6 +355,7 @@ class MainActivity : Activity(), SensorEventListener {
         // Éloignement très bref pendant une sajda déjà comptée : on ignore
         if (sajdaEnCours && maintenant - dernierLoin < dureeMinLoin) return
         sajdaEnCours = false
+        handler.removeCallbacks(confirmation)
         handler.postDelayed(confirmation, dureeMinProche)
     }
 
@@ -313,7 +375,7 @@ class MainActivity : Activity(), SensorEventListener {
             sajdas % 2 == 0 ->
                 vibrer(longArrayOf(0, 120, 120, 120)) // rak'a terminée
             else ->
-                vibrer(longArrayOf(0, 60)) // 1ère sajda
+                vibrer(longArrayOf(0, 80)) // 1ère sajda
         }
         majAffichage()
     }
@@ -332,6 +394,20 @@ class MainActivity : Activity(), SensorEventListener {
     // ------------------------------------------------------------------
     // Affichage
     // ------------------------------------------------------------------
+    private fun majDiag() {
+        val c = capteur
+        if (c == null) {
+            txtDiag.text = "Aucun capteur de proximité"
+            return
+        }
+        val v = if (derniereValeur.isNaN()) "—" else String.format("%.1f", derniereValeur)
+        val etat = if (derniereValeur.isNaN()) "en attente…" else if (derniereValeur < seuil(c)) "● PROCHE" else "○ LOIN"
+        txtDiag.text = "Capteur : ${c.name}\n" +
+            "max ${String.format("%.1f", c.maximumRange)} cm · seuil ${String.format("%.1f", seuil(c))} cm\n" +
+            "valeur $v cm  →  $etat\n" +
+            "changements détectés : $nbChangements"
+    }
+
     private fun majAffichage() {
         val rakatFinies = sajdas / 2
         txtRakat.text = rakatFinies.toString()
@@ -349,7 +425,7 @@ class MainActivity : Activity(), SensorEventListener {
 
         if (capteur != null) {
             txtEtat.text = when {
-                !actif -> "Choisissez la prière, appuyez sur Démarrer,\npuis posez le téléphone au sol, écran vers le haut,\nhaut du téléphone vers vous, là où se pose votre front."
+                !actif -> "Test : passez la main au-dessus du haut de l'écran,\nle cadre jaune doit passer à PROCHE."
                 objectifRakat > 0 && sajdas >= objectifRakat * 2 -> "✅ Prière terminée — appuyez sur Arrêter"
                 else -> "En écoute… (vibration à chaque sajda)"
             }
